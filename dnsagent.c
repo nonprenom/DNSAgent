@@ -310,6 +310,17 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 	printf("\n");
 }
 
+/**
+ * @brief This function parse a label inside a DNS answer and add it to the naem
+ * if the label finish with 0 it's the end of the string
+ * if the label start with a length it's a standard label then it calls itself recursively to parse the next label
+ * if the label start with 11 (0xC0) it's a pointer to an existing string in the buffer
+ * 
+ * @param dns_data : the begining of the DNS data buffer (pointing to the DNS header)
+ * @param offset : offset inside the dns_data buffer where the name starts
+ * @param name : output c-string where the name will be stored
+ * @return int : the new offset after parsing the name
+ */
 static int dns_names_parser(const uint8_t *dns_data, size_t offset, char *name)
 {
 	uint8_t len = dns_data[offset];
