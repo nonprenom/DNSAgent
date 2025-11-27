@@ -1,5 +1,9 @@
 #define _DEFAULT_SOURCE // to enable pcap definition of u_char below
 
+#include <stdio.h>
+#include <time.h>
+#include <arpa/inet.h>
+
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
@@ -57,30 +61,58 @@ int main(int argc, char **argv)
  * @param arg : c-string with the name of the interface to use
  * @return void*
  */
+
+// Define the desired buffer size (e.g., 4 MiB)
+#define CAPTURE_BUFFER_SIZE (4 * 1024 * 1024)
+
 static void *dns_responses_agent(void *arg)
 {
 	char *interface = (char *)arg;
 	char errbuf[PCAP_ERRBUF_SIZE];
 	pcap_t *handle;
+	int ret;
 
 	printf("Initialization of DNS Agent on interface [%s]\n", interface);
 
-	// open the pcap device on the interface
-	handle = pcap_open_live(interface, 65535, 1, 1000, errbuf);
-	if (!handle)
+	// create the pcap handle
+	handle = pcap_create(interface, errbuf);
+	if (handle == NULL)
 	{
-		fprintf(stderr, "pcap_open_live failed: %s\n", errbuf);
+		fprintf(stderr, "pcap_create failed: %s\n", errbuf);
+		return NULL;
+	}
+
+	// configure the buffer size (there was lots of truncated packets when calling "dig" very fast)
+	printf("Setting kernel buffer size to %d bytes...\n", CAPTURE_BUFFER_SIZE);
+	ret = pcap_set_buffer_size(handle, CAPTURE_BUFFER_SIZE);
+	if (ret < 0)
+	{
+		fprintf(stderr, "pcap_set_buffer_size failed: %s\n", pcap_geterr(handle));
+		pcap_close(handle);
+		return NULL;
+	}
+	pcap_set_snaplen(handle, 65535); // Snapshot length (snaplen)
+	pcap_set_promisc(handle, 1);	 // Promiscuous mode
+	pcap_set_timeout(handle, 1000);	 // Read timeout (1000 ms)
+
+	// activatepcap
+	ret = pcap_activate(handle);
+	if (ret < 0)
+	{
+		fprintf(stderr, "pcap_activate failed: %s\n", pcap_geterr(handle));
+		pcap_close(handle);
 		return NULL;
 	}
 
 	/* capture DNS responses only */
 	struct bpf_program fp;
-	// const char *filter = "udp and src port 53";
+	// const char *filter = "udp and src port 53"; -> this doesn' t capture the "big" TCP DNS responses
 	const char *filter = "udp and src port 53 or tcp and src port 53";
 
 	if (pcap_compile(handle, &fp, filter, 1, PCAP_NETMASK_UNKNOWN) == -1 || pcap_setfilter(handle, &fp) == -1)
 	{
 		fprintf(stderr, "Failed to set PCAP filter\n");
+		pcap_close(handle);
 		return NULL;
 	}
 
@@ -102,21 +134,21 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 	// if the value is 2 bytes, we need to use ntohs to convert from the network byte order to the host byte order (endianess)
 
 	// [Ethernet header] Check the ethernet ID (type) is IP
-	if (header->caplen < sizeof(struct ether_header)) 
+	if (header->caplen < sizeof(struct ether_header))
 	{
-        printf("Packet too short for Ethernet header (%u bytes)\n", header->caplen);
-        return;
-    }
+		// Packet too short for Ethernet header
+		return;
+	}
 	const struct ether_header *eth = (const struct ether_header *)packet;
 	uint16_t etherType = ntohs(eth->ether_type);
 	if (etherType != ETHERTYPE_IP)
 	{
 		return;
 	}
-	uint32_t remain = header->caplen - sizeof(struct ether_header);
-	if (remain < sizeof(struct ip))
+
+	if (header->caplen < sizeof(struct ether_header) + sizeof(struct ip))
 	{
-		printf("Truncated: less than IP header\n");
+		// too short for IP header
 		return;
 	}
 
@@ -126,16 +158,21 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 	//		  it is variable. the corrct length is 4 bytes * ihl value
 	//		https://datatracker.ietf.org/doc/html/rfc791#section-3.1
 	const uint8_t ip_hdr_len = ip->ihl * 4;
-	if (ip_hdr_len < 20) 
+	if (ip_hdr_len < 20)
 	{
-		printf("Invalid IP header length: %u\n", ip_hdr_len);
+		// Invalid IP header length
 		return;
 	}
 	// when the answer to the dns query is small, we receive a udp packet
-	// when the answer is big (like a query with all the records = ANY), we get a TCP packet + 2 bytes
+	// when the answer is big (like a query with all the records = ANY), we get a TCP packet. the DNS header is 2 bytes after the TCP header.
 	uint8_t proto_hdr_size = 0;
 	if (ip->protocol == IPPROTO_TCP)
 	{
+		if (header->caplen < ETHER_HDR_LEN + ip_hdr_len + sizeof(struct tcphdr))
+		{
+			// too short for TCP header
+			return;
+		}
 		const struct tcphdr *tcp = (const struct tcphdr *)(packet + ETHER_HDR_LEN + ip_hdr_len);
 		proto_hdr_size = tcp->th_off * 4 + 2;
 	}
@@ -155,9 +192,14 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 		uint16_t nbAuthorities; // Number of authorities records
 		uint16_t nbAdditionals; // Number of additionals record
 	} __attribute__((packed)) *dns = (struct dnshdr *)(packet + ETHER_HDR_LEN + ip_hdr_len + proto_hdr_size);
+	if (header->caplen < ETHER_HDR_LEN + ip_hdr_len + proto_hdr_size + sizeof(struct dnshdr))
+	{
+		// too short for DNS header
+		return;
+	}
 
 	// Check if it's an answer and not a query (flags.QR = 1), if there is answer(s) and if it's not an UDP truncated
-	const struct dnshdr_flags // this is the network order! (no need ntohs before..)
+	const struct dnshdr_flags // this is the network order
 	{
 		uint8_t QR : 1;
 		uint8_t Opcode : 4;
@@ -200,11 +242,12 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 	memset(name, 0, sizeof(name));
 	uint8_t *dns_data = (uint8_t *)dns;	   // to access the data bytes per bytes.
 	size_t offset = sizeof(struct dnshdr); // point to the beginning of the data
+
 	for (int i = 0; i < ntohs(dns->nbQuestions); i++)
 	{
-		name[0] = 0;
+		memset(name, 0, sizeof(name));
 		offset = dns_names_parser(dns_data, offset, name);
-		offset += 4; // type + class
+		offset += 4; // skip type + class
 	}
 	offset++;
 
@@ -273,7 +316,7 @@ static int dns_names_parser(const uint8_t *dns_data, size_t offset, char *name)
 	uint8_t len = dns_data[offset];
 	if (len == 0)
 	{
-		return offset+1;
+		return offset + 1;
 	}
 
 	if (len < 0xC0) // standard len + label
