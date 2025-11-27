@@ -62,9 +62,6 @@ int main(int argc, char **argv)
  * @return void*
  */
 
-// Define the desired buffer size (e.g., 4 MiB)
-#define CAPTURE_BUFFER_SIZE (4 * 1024 * 1024)
-
 static void *dns_responses_agent(void *arg)
 {
 	char *interface = (char *)arg;
@@ -83,7 +80,8 @@ static void *dns_responses_agent(void *arg)
 	}
 
 	// configure the buffer size (there was lots of truncated packets when calling "dig" very fast)
-	printf("Setting kernel buffer size to %d bytes...\n", CAPTURE_BUFFER_SIZE);
+	#define CAPTURE_BUFFER_SIZE (4 * 1024 * 1024)
+	printf("Setting pcap buffer size to %d bytes...\n", CAPTURE_BUFFER_SIZE);
 	ret = pcap_set_buffer_size(handle, CAPTURE_BUFFER_SIZE);
 	if (ret < 0)
 	{
@@ -164,7 +162,7 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 		return;
 	}
 	// when the answer to the dns query is small, we receive a udp packet
-	// when the answer is big (like a query with all the records = ANY), we get a TCP packet. the DNS header is 2 bytes after the TCP header.
+	// when the answer is big (like a query with all the records = ANY), we get a TCP packet. 
 	uint8_t proto_hdr_size = 0;
 	if (ip->protocol == IPPROTO_TCP)
 	{
@@ -174,7 +172,7 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 			return;
 		}
 		const struct tcphdr *tcp = (const struct tcphdr *)(packet + ETHER_HDR_LEN + ip_hdr_len);
-		proto_hdr_size = tcp->th_off * 4 + 2;
+		proto_hdr_size = tcp->th_off * 4 + 2; // the DNS header is 2 bytes after the end of the TCP header.
 	}
 	else
 	{
@@ -229,7 +227,7 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 		type (2 bytes)
 		class (2 bytes)
 
-		there are header->nbQuestions triplets
+		there are (header->nbQuestions) * triplets
 	*/
 
 	/* parse the name
@@ -302,6 +300,7 @@ static void dns_response_parser(u_char *args, const struct pcap_pkthdr *header, 
 				break;
 
 			default:
+				// should not happen since there is a "if" before
 				break;
 			}
 		}
@@ -336,7 +335,7 @@ static int dns_names_parser(const uint8_t *dns_data, size_t offset, char *name)
 		offset += len;
 		if (dns_data[offset] != 0)
 		{
-			// this label does not close the string yet, continue to concatenate the next one
+			// this label does not close the string yet, continue and concatenate the next one
 			offset = dns_names_parser(dns_data, offset, name);
 		}
 	}
