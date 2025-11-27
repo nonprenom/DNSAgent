@@ -13,17 +13,23 @@ CNAME records) in a clear, human-readable format.
 ## Build
 
 You need the pcap-dev package installed
+
 `# sudo apt-get install libpcap-dev`
 
 Then, run make in the directory
+
 `# make`
 
 ## Execute
 
 dnsagent requires 1 parameter : the interface to listen to.
+
 for example:
+
 `# ./dnsagent wlp0s20f3`
+
 You can see all the interfaces with the command 
+
 `# ip a`
 
 ### Note
@@ -108,6 +114,7 @@ Listening for DNS responses (udp and src port 53 or tcp and src port 53) on wlp0
 - The size of the pcap kernel buffer became too small to handle very fast and full DNS queries. For this, I increased the size of the kernel ring buffer to 4MB and added multiple checks during parsing to skip invalid packets.
 
 - Note on Embedded Optimization
+
 A larger pcap buffer is acceptable on a standard PC. However, if this program were designed for an embedded system, I would implement an additional custom ring buffer within the application and dedicate a new thread for parsing and printing the results.
 
 The proposed integration architecture would be as follows:
